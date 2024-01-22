@@ -37,4 +37,50 @@ fn main() {
     // println!("random word: {}", secret_word);
 
     // Your code here! :)
+    let wordlen: usize = secret_word_chars.len();
+    let mut current_word_chars: Vec<char> = "-".repeat(wordlen).chars().collect();
+    let mut left_times: u32 = NUM_INCORRECT_GUESSES;
+    let mut guess_right: usize = 0;
+    let mut guessed_letters: String = String::new();
+    println!("Welcome to CS110L Hangman!");
+    while left_times > 0 && guess_right < wordlen {
+        print!("The word so far is ");
+        for ch in current_word_chars.iter() {
+            print!("{}", ch);
+        }
+        println!();
+        println!("You have guessed the following letters: {}", guessed_letters);
+        println!("You have {} guesses left", left_times);
+        print!("Please guess a letter: ");
+        io::stdout()
+            .flush()
+            .expect("Error flushing stdout.");
+        let mut guess = String::new();
+        io::stdin()
+            .read_line(&mut guess)
+            .expect("Error reading line.");
+        if guess.len() > 3 {
+            eprintln!("Please input a letter!")
+        }
+        guessed_letters.insert(guessed_letters.len(), guess.chars().nth(0).unwrap());
+        let mut flag: bool = true;
+        for i in 0..wordlen {
+            if current_word_chars[i] == '-' && secret_word_chars[i] == guess.chars().nth(0).unwrap() {
+                current_word_chars[i] = secret_word_chars[i];
+                guess_right += 1;
+                flag = false;
+                break;
+            }
+        }
+        if flag {
+            println!("Sorry, that letter is not in the word");
+            left_times -= 1;
+        }
+        println!();
+    }
+    if left_times == 0 {
+        println!("Sorry, you ran out of guesses!");
+    } else {
+        println!("Congratulations you guessed the secret word: {}!", secret_word);
+    }
 }
