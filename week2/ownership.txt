@@ -9,7 +9,7 @@ fn main() {
     println!("{}", ref3.to_uppercase());
 }
 ```
-
+doesn't compile
 
 
 Example 2:
@@ -19,7 +19,7 @@ fn drip_drop() -> &String {
     return &s;
 }
 ```
-
+doesn't compile
 
 
 Example 3:
@@ -32,3 +32,5 @@ fn main() {
     println!("{}", s2);
 }
 ```
+doesn't compile
+modification: let s2: &String = &v[0];
