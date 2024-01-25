@@ -38,6 +38,14 @@ impl Debugger {
                         // TODO (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
+                        let continue_res = self.inferior.as_mut().unwrap().continue_execute();
+                        if continue_res.is_ok() {
+                            match continue_res.unwrap() {
+                                crate::inferior::Status::Stopped(_, _) => println!("Child stopped"),
+                                crate::inferior::Status::Exited(exit_code) => println!("Child exited (status {})", exit_code),
+                                crate::inferior::Status::Signaled(_) => println!("Child exited exited due to a signal"),
+                            }
+                        }
                     } else {
                         println!("Error starting subprocess");
                     }
