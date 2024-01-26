@@ -8,6 +8,8 @@ use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
 
+use crate::dwarf_data::DwarfData;
+
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
     /// current instruction pointer that it is stopped at.
@@ -88,16 +90,35 @@ impl Inferior {
     }
 
     pub fn kill(&mut self) {
-        // let res = self.wait(Some(WaitPidFlag::WNOWAIT));
-        // if !res.is_ok() {
-        //     println!("wait error!");
-        //     return;
-        // }
-        // match res.unwrap() {
-        //     Status::Stopped(_, _) => {
         if self.child.kill().is_ok() {
             self.wait(None).ok();
             println!("Killing running inferior (pid {})", self.pid());
         }
+    }
+
+    pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
+        let regs = ptrace::getregs(self.pid())?;
+        let mut instruction_ptr = regs.rip as usize;
+        let mut base_ptr = regs.rbp as usize;
+        let mut debug_current_line = debug_data.get_line_from_addr(instruction_ptr);
+        let mut debug_current_func = debug_data.get_function_from_addr(instruction_ptr);
+        loop {
+            // println!("%rip register: {:#x}, %rbp register: {:#x}", instruction_ptr, base_ptr);
+            if debug_current_line.is_none() || debug_current_func.is_none() { return Err(nix::Error::InvalidPath); }
+            let func_name = debug_current_func.as_ref().unwrap();
+            let file_name = &debug_current_line.as_ref().unwrap().file;
+            let code_line = debug_current_line.as_ref().unwrap().number;
+            println!("{} ({}:{})", func_name, file_name, code_line);
+            if func_name == "main" { break; }
+            instruction_ptr = ptrace::read(self.pid(), (base_ptr + 8) as ptrace::AddressType)? as usize;
+            base_ptr = ptrace::read(self.pid(), base_ptr as ptrace::AddressType)? as usize;
+            debug_current_line = debug_data.get_line_from_addr(instruction_ptr);
+            debug_current_func = debug_data.get_function_from_addr(instruction_ptr);
+        }
+        // 
+        //     println!("{} ({}:{})", debug_current_func.unwrap(), debug_current_line.as_ref().unwrap().file, debug_current_line.as_ref().unwrap().number);
+        // }
+        
+        Ok(())
     }
 }
