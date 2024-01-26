@@ -1,3 +1,4 @@
+// use libc::WNOWAIT;
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::signal::Signal;
@@ -52,12 +53,12 @@ impl Inferior {
                     return None;
                 }
             },
-            _other => {
+            _ => {
                 println!("Other Status!");
                 return None;
             },
         }
-        println!("Check signal SIGTRAP succeed!");
+        // println!("Check signal SIGTRAP succeed!");
         let res = Inferior {child};
         Some(res)
     }
@@ -84,5 +85,19 @@ impl Inferior {
     pub fn continue_execute(&self) -> Result<Status, nix::Error> {
         ptrace::cont(self.pid(), None)?;
         Ok(self.wait(None)?)
+    }
+
+    pub fn kill(&mut self) {
+        // let res = self.wait(Some(WaitPidFlag::WNOWAIT));
+        // if !res.is_ok() {
+        //     println!("wait error!");
+        //     return;
+        // }
+        // match res.unwrap() {
+        //     Status::Stopped(_, _) => {
+        if self.child.kill().is_ok() {
+            self.wait(None).ok();
+            println!("Killing running inferior (pid {})", self.pid());
+        }
     }
 }
