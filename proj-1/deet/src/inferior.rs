@@ -7,7 +7,7 @@ use nix::unistd::Pid;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
-
+use std::mem::size_of;
 use crate::dwarf_data::DwarfData;
 
 pub enum Status {
@@ -36,33 +36,48 @@ pub struct Inferior {
     child: Child,
 }
 
+fn align_addr_to_word(addr: usize) -> usize {
+    addr & (-(size_of::<usize>() as isize) as usize)
+}
+
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: &Vec<usize>) -> Option<Inferior> {
         // TODO: implement me!
         let mut cmd = Command::new(target);
         cmd.args(args);
         unsafe {
             cmd.pre_exec(child_traceme);
         }
-        let child = cmd.spawn().ok()?;
-        
-        match waitpid(nix::unistd::Pid::from_raw(child.id() as i32), Some(WaitPidFlag::WUNTRACED)).ok()? {
-            WaitStatus::Stopped(_, signal) => {
-                if signal != Signal::SIGTRAP {
-                    println!("WaitStatus::Stopped : Not signaled by SIGTRAP!");
-                    return None;
+        match cmd.spawn() {
+            Ok(child) => {
+                match waitpid(nix::unistd::Pid::from_raw(child.id() as i32), Some(WaitPidFlag::WUNTRACED)).ok()? {
+                    WaitStatus::Stopped(_, signal) => {
+                        if signal != Signal::SIGTRAP {
+                            println!("WaitStatus::Stopped : Not signaled by SIGTRAP!");
+                            return None;
+                        }
+                    },
+                    _ => {
+                        println!("Other Status!");
+                        return None;
+                    },
                 }
+                let mut res = Inferior {child};
+                // Install breakpoints
+                for breakpoint in breakpoints {
+                    println!("{:#x}", breakpoint);
+                    let aa = res.write_byte(*breakpoint, 0xcc);
+                    println!("{:?}", aa);
+                }
+                // println!("Check signal SIGTRAP succeed!");
+                Some(res)
             },
-            _ => {
-                println!("Other Status!");
-                return None;
-            },
+            Err(_) => None,
         }
-        // println!("Check signal SIGTRAP succeed!");
-        let res = Inferior {child};
-        Some(res)
+        
+        
     }
 
     /// Returns the pid of this inferior.
@@ -104,7 +119,6 @@ impl Inferior {
         let mut debug_current_func = debug_data.get_function_from_addr(instruction_ptr);
         loop {
             // println!("%rip register: {:#x}, %rbp register: {:#x}", instruction_ptr, base_ptr);
-            if debug_current_line.is_none() || debug_current_func.is_none() { return Err(nix::Error::InvalidPath); }
             let func_name = debug_current_func.as_ref().unwrap();
             let file_name = &debug_current_line.as_ref().unwrap().file;
             let code_line = debug_current_line.as_ref().unwrap().number;
@@ -114,11 +128,22 @@ impl Inferior {
             base_ptr = ptrace::read(self.pid(), base_ptr as ptrace::AddressType)? as usize;
             debug_current_line = debug_data.get_line_from_addr(instruction_ptr);
             debug_current_func = debug_data.get_function_from_addr(instruction_ptr);
-        }
-        // 
-        //     println!("{} ({}:{})", debug_current_func.unwrap(), debug_current_line.as_ref().unwrap().file, debug_current_line.as_ref().unwrap().number);
-        // }
-        
+        }        
         Ok(())
+    }
+
+    pub fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
+        let aligned_addr = align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
+        let orig_byte = (word >> 8 * byte_offset) & 0xff;
+        let masked_word = word & !(0xff << 8 * byte_offset);
+        let updated_word = masked_word | ((val as u64) << 8 * byte_offset);
+        unsafe { ptrace::write(
+            self.pid(),
+            aligned_addr as ptrace::AddressType,
+            updated_word as *mut std::ffi::c_void,
+        ) }?;
+        Ok(orig_byte as u8)
     }
 }

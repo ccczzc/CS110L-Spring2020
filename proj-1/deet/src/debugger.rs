@@ -1,16 +1,17 @@
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::{Inferior, Status};
-// use nix::sys::wait::WaitStatus;
 use rustyline::error::ReadlineError;
+use rustyline::history::FileHistory;
 use rustyline::Editor;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 
 pub struct Debugger {
     target: String,
     history_path: String,
-    readline: Editor<()>,
+    readline: Editor<(), FileHistory>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
+    breakpoints: Vec<usize>,
 }
 
 impl Debugger {
@@ -28,9 +29,10 @@ impl Debugger {
                 std::process::exit(1);
             }
         };
+        debug_data.print();
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
-        let mut readline = Editor::<()>::new();
+        let mut readline = Editor::<(), FileHistory>::new().expect("Create Editor fail");
         // Attempt to load history from ~/.deet_history if it exists
         let _ = readline.load_history(&history_path);
 
@@ -40,6 +42,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
+            breakpoints: Vec::new(),
         }
     }
 
@@ -52,7 +55,7 @@ impl Debugger {
                         self.inferior.as_mut().unwrap().kill();
                         self.inferior = None;
                     }
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
                         // Create the inferior
                         self.inferior = Some(inferior);
                         // TODO (milestone 1): make the inferior run
@@ -70,6 +73,7 @@ impl Debugger {
                                         let file_name = &debug_current_line.as_ref().unwrap().file;
                                         let code_line = debug_current_line.as_ref().unwrap().number;
                                         println!("Stopped at {} ({}:{})", func_name, file_name, code_line);
+                                        println!("{:#x}", rip);
                                     }
                                 },
                                 Status::Exited(exit_code) => {
@@ -100,7 +104,17 @@ impl Debugger {
                         let continue_res = self.inferior.as_ref().unwrap().continue_execute();
                         if continue_res.is_ok() {
                             match continue_res.unwrap() {
-                                Status::Stopped(stopped_signal, _) => println!("Child stopped (signal {})", stopped_signal.as_str()),
+                                Status::Stopped(stopped_signal, rip) => {
+                                    println!("Child stopped (signal {})", stopped_signal.as_str());
+                                    let debug_current_line = self.debug_data.get_line_from_addr(rip);
+                                    let debug_current_func = self.debug_data.get_function_from_addr(rip);
+                                    if debug_current_line.is_some() && debug_current_func.is_some() {
+                                        let func_name = debug_current_func.as_ref().unwrap();
+                                        let file_name = &debug_current_line.as_ref().unwrap().file;
+                                        let code_line = debug_current_line.as_ref().unwrap().number;
+                                        println!("Stopped at {} ({}:{})", func_name, file_name, code_line);
+                                    }
+                                },
                                 Status::Exited(exit_code) => {
                                     println!("Child exited (status {})", exit_code);
                                     self.inferior = None;
@@ -118,6 +132,22 @@ impl Debugger {
                     } else {
                         if self.inferior.as_ref().unwrap().print_backtrace(&self.debug_data).is_err() {
                             eprintln!("Backtrace failed!");
+                        }
+                    }
+                },
+                DebuggerCommand::Breakpoint(breakpoint) => {
+                    println!("Set breakpoint {} at {}", self.breakpoints.len(), &breakpoint[1..]);
+                    if breakpoint.starts_with("*") {
+                        let bp_addr = Debugger::parse_address(&breakpoint[1..]);
+                        if bp_addr.is_some() {
+                            if self.inferior.is_none() {
+                                self.breakpoints.push(bp_addr.unwrap());
+                            } else {
+                                let aa = self.inferior.as_mut().unwrap().write_byte(bp_addr.unwrap(), 0xcc);
+                                println!("{:?}", aa);
+                            }
+                            // println!("{}", bp_addr.unwrap());
+                            
                         }
                     }
                 },
@@ -164,5 +194,14 @@ impl Debugger {
                 }
             }
         }
+    }
+
+    pub fn parse_address(addr: &str) -> Option<usize> {
+        let addr_without_0x = if addr.to_lowercase().starts_with("0x") {
+            &addr[2..]
+        } else {
+            &addr
+        };
+        usize::from_str_radix(addr_without_0x, 16).ok()
     }
 }
