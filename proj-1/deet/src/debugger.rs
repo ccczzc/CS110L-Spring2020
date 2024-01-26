@@ -61,7 +61,17 @@ impl Debugger {
                         let continue_res = self.inferior.as_ref().unwrap().continue_execute();
                         if continue_res.is_ok() {
                             match continue_res.unwrap() {
-                                Status::Stopped(stopped_signal, _) => println!("Child stopped (signal {})", stopped_signal.as_str()),
+                                Status::Stopped(stopped_signal, rip) => {
+                                    println!("Child stopped (signal {})", stopped_signal.as_str());
+                                    let debug_current_line = self.debug_data.get_line_from_addr(rip);
+                                    let debug_current_func = self.debug_data.get_function_from_addr(rip);
+                                    if debug_current_line.is_some() && debug_current_func.is_some() {
+                                        let func_name = debug_current_func.as_ref().unwrap();
+                                        let file_name = &debug_current_line.as_ref().unwrap().file;
+                                        let code_line = debug_current_line.as_ref().unwrap().number;
+                                        println!("Stopped at {} ({}:{})", func_name, file_name, code_line);
+                                    }
+                                },
                                 Status::Exited(exit_code) => {
                                     println!("Child exited (status {})", exit_code);
                                     self.inferior = None;
