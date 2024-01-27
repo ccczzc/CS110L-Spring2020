@@ -9,6 +9,7 @@ use std::process::Child;
 use std::process::Command;
 use std::mem::size_of;
 use crate::dwarf_data::DwarfData;
+use std::collections::HashMap;
 
 pub enum Status {
     /// Indicates inferior stopped. Contains the signal that stopped the process, as well as the
@@ -34,6 +35,7 @@ fn child_traceme() -> Result<(), std::io::Error> {
 
 pub struct Inferior {
     child: Child,
+    breakpoints: HashMap<usize, u8>,
 }
 
 fn align_addr_to_word(addr: usize) -> usize {
@@ -43,7 +45,7 @@ fn align_addr_to_word(addr: usize) -> usize {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>, breakpoints: &Vec<usize>) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>, breakpoints: HashMap<usize, u8>) -> Option<Inferior> {
         // TODO: implement me!
         let mut cmd = Command::new(target);
         cmd.args(args);
@@ -64,20 +66,18 @@ impl Inferior {
                         return None;
                     },
                 }
-                let mut res = Inferior {child};
+                let mut res = Inferior {child, breakpoints};
                 // Install breakpoints
-                for breakpoint in breakpoints {
-                    println!("{:#x}", breakpoint);
-                    let aa = res.write_byte(*breakpoint, 0xcc);
-                    println!("{:?}", aa);
+                for breakpoint in res.breakpoints.clone() {
+                    if let Err(_) = res.insert_breakpoint(breakpoint.0) {
+                        eprintln!("Breakpoint Install failed!");
+                    }
                 }
                 // println!("Check signal SIGTRAP succeed!");
                 Some(res)
             },
             Err(_) => None,
         }
-        
-        
     }
 
     /// Returns the pid of this inferior.
@@ -99,9 +99,36 @@ impl Inferior {
         })
     }
 
-    pub fn continue_execute(&self) -> Result<Status, nix::Error> {
+    pub fn continue_execute(&mut self) -> Result<Status, nix::Error> {
+        let mut regs = ptrace::getregs(self.pid())?;
+        let instruction_ptr = (regs.rip as usize) - 1;
+        if let Some(rip_original_byte) = self.breakpoints.get(&instruction_ptr) {
+            if self.write_byte(instruction_ptr, *rip_original_byte).is_ok() {
+                regs.rip = instruction_ptr as u64;
+                if let Err(er) = ptrace::setregs(self.pid(), regs) { 
+                    eprintln!("Breakpoint: set rip = rip-1 failed!");
+                    return Err(er);
+                }
+                if let Err(er) = ptrace::step(self.pid(), None) {
+                    eprintln!("Breakpoint: go to next instruction failed!");
+                    return Err(er);
+                }
+                match self.wait(None) {
+                    Ok(status) => {
+                        if let Status::Stopped(_, _) = status {
+                            if let Err(er) = self.write_byte(instruction_ptr, 0xcc) {
+                                return Err(er);
+                            };
+                        }
+                    } ,
+                    Err(er) => return Err(er),
+                }
+            } else {
+                eprintln!("Breakpoint: restore first byte failed!");
+            }
+        }
         ptrace::cont(self.pid(), None)?;
-        Ok(self.wait(None)?)
+        self.wait(None)
     }
 
     pub fn kill(&mut self) {
@@ -145,5 +172,14 @@ impl Inferior {
             updated_word as *mut std::ffi::c_void,
         ) }?;
         Ok(orig_byte as u8)
+    }
+
+    pub fn insert_breakpoint(&mut self, addr: usize) -> Result<(), ()> {
+        if let Ok(original_byte) = self.write_byte(addr, 0xcc) {
+            self.breakpoints.insert(addr, original_byte);
+            Ok(())
+        } else {
+            Err(())
+        }
     }
 }

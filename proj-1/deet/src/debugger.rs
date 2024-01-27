@@ -1,9 +1,12 @@
 use crate::debugger_command::DebuggerCommand;
 use crate::inferior::{Inferior, Status};
+// use nix::sys::ptrace;
+use nix::sys::signal::Signal;
 use rustyline::error::ReadlineError;
 use rustyline::history::FileHistory;
 use rustyline::Editor;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
+use std::collections::HashMap;
 
 pub struct Debugger {
     target: String,
@@ -11,7 +14,7 @@ pub struct Debugger {
     readline: Editor<(), FileHistory>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
-    breakpoints: Vec<usize>,
+    breakpoints: HashMap<usize, u8>,
 }
 
 impl Debugger {
@@ -42,7 +45,7 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
-            breakpoints: Vec::new(),
+            breakpoints: HashMap::new(),
         }
     }
 
@@ -55,34 +58,13 @@ impl Debugger {
                         self.inferior.as_mut().unwrap().kill();
                         self.inferior = None;
                     }
-                    if let Some(inferior) = Inferior::new(&self.target, &args, &self.breakpoints) {
+                    if let Some(inferior) = Inferior::new(&self.target, &args, self.breakpoints.clone()) {
                         // Create the inferior
                         self.inferior = Some(inferior);
-                        // TODO (milestone 1): make the inferior run
+                        // (milestone 1): make the inferior run
                         // You may use self.inferior.as_mut().unwrap() to get a mutable reference
                         // to the Inferior object
-                        let continue_res = self.inferior.as_ref().unwrap().continue_execute();
-                        if continue_res.is_ok() {
-                            match continue_res.unwrap() {
-                                Status::Stopped(stopped_signal, rip) => {
-                                    println!("Child stopped (signal {})", stopped_signal.as_str());
-                                    let debug_current_line = self.debug_data.get_line_from_addr(rip);
-                                    let debug_current_func = self.debug_data.get_function_from_addr(rip);
-                                    if debug_current_line.is_some() && debug_current_func.is_some() {
-                                        let func_name = debug_current_func.as_ref().unwrap();
-                                        let file_name = &debug_current_line.as_ref().unwrap().file;
-                                        let code_line = debug_current_line.as_ref().unwrap().number;
-                                        println!("Stopped at {} ({}:{})", func_name, file_name, code_line);
-                                        println!("{:#x}", rip);
-                                    }
-                                },
-                                Status::Exited(exit_code) => {
-                                    println!("Child exited (status {})", exit_code);
-                                    self.inferior = None;
-                                },
-                                Status::Signaled(signaled_signal) => println!("Child exited exited due to signal {}", signaled_signal),
-                            }
-                        } else {
+                        if self.inferior_continue_execute().is_err() {
                             eprintln!("Error starting subprocess");
                         }
                     } else {
@@ -101,28 +83,8 @@ impl Debugger {
                     if self.inferior.is_none() {
                         eprintln!("No existing inferior is running!");
                     } else {
-                        let continue_res = self.inferior.as_ref().unwrap().continue_execute();
-                        if continue_res.is_ok() {
-                            match continue_res.unwrap() {
-                                Status::Stopped(stopped_signal, rip) => {
-                                    println!("Child stopped (signal {})", stopped_signal.as_str());
-                                    let debug_current_line = self.debug_data.get_line_from_addr(rip);
-                                    let debug_current_func = self.debug_data.get_function_from_addr(rip);
-                                    if debug_current_line.is_some() && debug_current_func.is_some() {
-                                        let func_name = debug_current_func.as_ref().unwrap();
-                                        let file_name = &debug_current_line.as_ref().unwrap().file;
-                                        let code_line = debug_current_line.as_ref().unwrap().number;
-                                        println!("Stopped at {} ({}:{})", func_name, file_name, code_line);
-                                    }
-                                },
-                                Status::Exited(exit_code) => {
-                                    println!("Child exited (status {})", exit_code);
-                                    self.inferior = None;
-                                },
-                                Status::Signaled(signaled_signal) => println!("Child exited exited due to signal {}", signaled_signal),
-                            }
-                        } else {
-                            eprintln!("Continue failed!");
+                        if self.inferior_continue_execute().is_err() {
+                            eprintln!("Continue Execute failed!");
                         }
                     }
                 },
@@ -136,22 +98,70 @@ impl Debugger {
                     }
                 },
                 DebuggerCommand::Breakpoint(breakpoint) => {
-                    println!("Set breakpoint {} at {}", self.breakpoints.len(), &breakpoint[1..]);
-                    if breakpoint.starts_with("*") {
-                        let bp_addr = Debugger::parse_address(&breakpoint[1..]);
-                        if bp_addr.is_some() {
-                            if self.inferior.is_none() {
-                                self.breakpoints.push(bp_addr.unwrap());
-                            } else {
-                                let aa = self.inferior.as_mut().unwrap().write_byte(bp_addr.unwrap(), 0xcc);
-                                println!("{:?}", aa);
-                            }
-                            // println!("{}", bp_addr.unwrap());
-                            
+                    let mut breakpoint_address: usize = 0;
+                    if breakpoint.starts_with("*") {    // raw address
+                        if let Some(bp_addr) = Debugger::parse_address(&breakpoint[1..]) {
+                            breakpoint_address = bp_addr;
+                        }
+                    } else if let Ok(line_number) = breakpoint.parse::<usize>() {   // line number
+                        if let Some(addr) = self.debug_data.get_addr_for_line(None, line_number) {
+                            breakpoint_address = addr;
+                        }
+                    } else if let Some(addr) = self.debug_data.get_addr_for_function(None, &breakpoint) {
+                        breakpoint_address = addr;
+                    } else {
+                        eprintln!("{} can't be parsed to a valid breakpoint address!", breakpoint);
+                        eprintln!("Usage: {{b | break | breakpoint}} *{{raw address | line number | function name}}");
+                        continue;
+                    }
+
+                    self.breakpoints.insert(breakpoint_address, 0);
+                    if self.inferior.is_none() {
+                        println!("Set breakpoint {} at {:#x}", self.breakpoints.len() - 1, breakpoint_address);
+                    } else {
+                        if self.inferior.as_mut().unwrap().insert_breakpoint(breakpoint_address).is_err() {
+                            eprintln!("Breakpoint Install failed!");
+                        } else {
+                            println!("Set breakpoint {} at {:#x}", self.breakpoints.len() - 1, breakpoint_address);
                         }
                     }
                 },
             }
+        }
+    }
+
+    /// This function encapsualte inferior.continue_execute() to Debugger::inferior_continue_execute
+    /// can print status of inferior according to its signal 
+    pub fn inferior_continue_execute(&mut self) -> Result<(), ()>{
+        match self.inferior.as_mut().unwrap().continue_execute() {
+            Ok(continue_res) => {
+                match continue_res {
+                    Status::Stopped(stopped_signal, cur_addr) => {
+                        self.print_stopped_location(stopped_signal, cur_addr);
+                    },
+                    Status::Exited(exit_code) => {
+                        println!("Child exited (status {})", exit_code);
+                        self.inferior = None;
+                    },
+                    Status::Signaled(signaled_signal) => println!("Child exited due to signal {}", signaled_signal),
+                };
+                Ok(())
+            },
+            Err(_) => Err(()),
+        }
+    }
+
+    /// This function prints the reason why the process stop(by which signal) 
+    /// and current stopped location & function & line number(if is_some())
+    pub fn print_stopped_location(&mut self, stopped_signal: Signal, cur_addr: usize) {
+        println!("Child stopped (signal {})", stopped_signal.as_str());
+        let debug_current_line = self.debug_data.get_line_from_addr(cur_addr);
+        let debug_current_func = self.debug_data.get_function_from_addr(cur_addr);
+        if debug_current_line.is_some() && debug_current_func.is_some() {
+            let func_name = debug_current_func.as_ref().unwrap();
+            let file_name = &debug_current_line.as_ref().unwrap().file;
+            let code_line = debug_current_line.as_ref().unwrap().number;
+            println!("Stopped at {} ({}:{})", func_name, file_name, code_line);
         }
     }
 
@@ -178,7 +188,7 @@ impl Debugger {
                     if line.trim().len() == 0 {
                         continue;
                     }
-                    self.readline.add_history_entry(line.as_str());
+                    self.readline.add_history_entry(line.as_str()).ok();
                     if let Err(err) = self.readline.save_history(&self.history_path) {
                         println!(
                             "Warning: failed to save history file at {}: {}",
