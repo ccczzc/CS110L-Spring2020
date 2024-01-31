@@ -1,12 +1,12 @@
 mod request;
 mod response;
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use clap::Parser;
 // use nix::unistd::sleep;
 use rand::{Rng, SeedableRng};
-use tokio::{net::{TcpListener, TcpStream}, sync::RwLock, time::sleep};
+use tokio::{net::{TcpListener, TcpStream}, sync::RwLock, time::{sleep, Instant, Duration}};
 use std::io::{Error, ErrorKind};
 // use std::thread;
 
@@ -51,6 +51,8 @@ struct ProxyState {
     upstream_addresses: Vec<String>,
     /// Active addressed of servers
     active_upstream_addresses: Arc<RwLock<Vec<String>>>,
+    /// Counter of the requests of client_ip
+    counter_of_requests: Arc<RwLock<HashMap<String, (usize, Instant)>>>,
 }
 
 #[tokio::main]
@@ -84,11 +86,13 @@ async fn main() {
     let state = ProxyState {
         active_upstream_addresses: Arc::new(RwLock::new(options.upstream.clone())),
         upstream_addresses: options.upstream,
+        counter_of_requests: Arc::new(RwLock::new(HashMap::new())),
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
     };
 
+    // Spawn a new thread to do active health checks
     let state_checks = state.clone();
     tokio::spawn(async move {
         active_health_checks(&state_checks).await
@@ -104,6 +108,7 @@ async fn main() {
     }
 }
 
+/// Implementation of Milestone 4 Done: Failover with active health checks
 async fn active_health_checks(state: &ProxyState) {
     loop {
         sleep(Duration::from_secs(state.active_health_check_interval as u64)).await;
@@ -128,10 +133,7 @@ async fn active_health_checks(state: &ProxyState) {
                     }
                     let response = match response::read_from_stream(&mut upstream_conn, request.method()).await {
                         Ok(response) => response,
-                        Err(error) => {
-                            log::error!("Error reading response from server: {:?}", error);
-                            continue;
-                        }
+                        Err(_error) => { continue; },
                     };
                     if response.status().as_u16() == 200 {
                         active_upstream_addresses.push(upstream_addr.clone());
@@ -149,7 +151,6 @@ async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, Error> {
         let mut upstream_addresses = state.active_upstream_addresses.write().await;
         let upstream_idx = rng.gen_range(0..upstream_addresses.len());
         let upstream_ip = upstream_addresses[upstream_idx].clone();
-        // drop(upstream_addresses);
         match TcpStream::connect(upstream_ip).await {
             Ok(conn) => return Ok(conn),
             Err(_err) => {
@@ -196,7 +197,28 @@ async fn handle_connection(mut client_conn: TcpStream, state: &ProxyState) {
     loop {
         // Read a request from the client
         let mut request = match request::read_from_stream(&mut client_conn).await {
-            Ok(request) => request,
+            Ok(request) => {
+                // Implementation of Milestone 5 Done : Rate limiting
+                // Only check if state.max_requests_per_minute != 0, that is, rate limiting should be enabled
+                if state.max_requests_per_minute != 0 {
+                    let mut counter_of_requests = state.counter_of_requests.write().await;
+                    match counter_of_requests.get_mut(&client_ip) {
+                        Some((cnt, prev_time)) => {
+                            *cnt += 1;
+                            if *cnt >= state.max_requests_per_minute && prev_time.elapsed().as_secs_f64() < 60.0 {  //  If a client makes more requests than "max_requests_per_minute" within a minute
+                                let response = response::make_http_error(http::StatusCode::TOO_MANY_REQUESTS);
+                                send_response(&mut client_conn, &response).await;
+                                continue;
+                            } else if prev_time.elapsed().as_secs_f64() >= 60.0 {   // start a new minute
+                                *cnt = 1;
+                                *prev_time = Instant::now();
+                            }
+                        },
+                        None => { counter_of_requests.insert(client_ip.clone(), (0, Instant::now())); },
+                    };
+                }
+                request
+            },
             // Handle case where client closed connection and is no longer sending requests
             Err(request::Error::IncompleteRequest(0)) => {
                 log::debug!("Client finished sending requests. Shutting down connection");
