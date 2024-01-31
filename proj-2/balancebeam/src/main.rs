@@ -1,11 +1,12 @@
 mod request;
 mod response;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use clap::Parser;
+// use nix::unistd::sleep;
 use rand::{Rng, SeedableRng};
-use tokio::{net::{TcpListener, TcpStream}, sync::RwLock};
+use tokio::{net::{TcpListener, TcpStream}, sync::RwLock, time::sleep};
 use std::io::{Error, ErrorKind};
 // use std::thread;
 
@@ -47,7 +48,9 @@ struct ProxyState {
     #[allow(dead_code)]
     max_requests_per_minute: usize,
     /// Addresses of servers that we are proxying to
-    upstream_addresses: Arc<RwLock<Vec<String>>>,
+    upstream_addresses: Vec<String>,
+    /// Active addressed of servers
+    active_upstream_addresses: Arc<RwLock<Vec<String>>>,
 }
 
 #[tokio::main]
@@ -79,18 +82,63 @@ async fn main() {
 
     // Handle incoming connections
     let state = ProxyState {
-        upstream_addresses: Arc::new(RwLock::new(options.upstream)) ,
+        active_upstream_addresses: Arc::new(RwLock::new(options.upstream.clone())),
+        upstream_addresses: options.upstream,
         active_health_check_interval: options.active_health_check_interval,
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
     };
-    let mut threads = Vec::new();
+
+    let state_checks = state.clone();
+    tokio::spawn(async move {
+        active_health_checks(&state_checks).await
+    });
+    
     loop {
         if let Ok((socket, _)) = listener.accept().await {
             let state = state.clone();
-            threads.push(tokio::spawn(async move {
+            tokio::spawn(async move {
                 handle_connection(socket, &state).await
-            }));
+            });
+        }
+    }
+}
+
+async fn active_health_checks(state: &ProxyState) {
+    loop {
+        sleep(Duration::from_secs(state.active_health_check_interval as u64)).await;
+        let mut active_upstream_addresses = state.active_upstream_addresses.write().await;
+        active_upstream_addresses.clear();
+        for upstream_addr in &state.upstream_addresses {
+            let request = http::Request::builder()
+                .method(http::Method::GET)
+                .uri(&state.active_health_check_path)
+                .header("Host", upstream_addr)
+                .body(Vec::new())
+                .unwrap();
+            match TcpStream::connect(upstream_addr).await {
+                Ok(mut upstream_conn) => {
+                    if let Err(error) = request::write_to_stream(&request, &mut upstream_conn).await {
+                        log::error!(
+                            "Failed to send request to upstream {}: {}",
+                            upstream_addr,
+                            error
+                        );
+                        continue;
+                    }
+                    let response = match response::read_from_stream(&mut upstream_conn, request.method()).await {
+                        Ok(response) => response,
+                        Err(error) => {
+                            log::error!("Error reading response from server: {:?}", error);
+                            continue;
+                        }
+                    };
+                    if response.status().as_u16() == 200 {
+                        active_upstream_addresses.push(upstream_addr.clone());
+                    }
+                },
+                Err(_) => continue,
+            }
         }
     }
 }
@@ -98,14 +146,13 @@ async fn main() {
 async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
     loop {
-        let upstream_addresses = state.upstream_addresses.read().await;
+        let mut upstream_addresses = state.active_upstream_addresses.write().await;
         let upstream_idx = rng.gen_range(0..upstream_addresses.len());
         let upstream_ip = upstream_addresses[upstream_idx].clone();
-        drop(upstream_addresses);
+        // drop(upstream_addresses);
         match TcpStream::connect(upstream_ip).await {
             Ok(conn) => return Ok(conn),
             Err(_err) => {
-                let mut upstream_addresses = state.upstream_addresses.write().await;
                 upstream_addresses.swap_remove(upstream_idx);
                 if upstream_addresses.is_empty() {
                     log::error!("Failed to connect to upstream");
