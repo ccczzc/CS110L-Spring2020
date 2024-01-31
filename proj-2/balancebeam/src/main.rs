@@ -81,21 +81,15 @@ async fn main() {
         active_health_check_path: options.active_health_check_path,
         max_requests_per_minute: options.max_requests_per_minute,
     };
-    // let mut threads = Vec::new();
+    let mut threads = Vec::new();
     loop {
         if let Ok((socket, _)) = listener.accept().await {
-            handle_connection(socket, &state).await;
+            let state = state.clone();
+            threads.push(tokio::spawn(async move {
+                handle_connection(socket, &state).await
+            }));
         }
     }
-    // for stream in ? {
-    //     if let Ok(stream) = stream {
-    //         let state = state.clone();
-    //         // Handle the connection!
-    //         threads.push(thread::spawn(move || {
-    //             handle_connection(stream, &state);
-    //         }))
-    //     }
-    // }
 }
 
 async fn connect_to_upstream(state: &ProxyState) -> Result<TcpStream, std::io::Error> {
